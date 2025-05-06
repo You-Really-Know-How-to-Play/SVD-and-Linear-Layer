@@ -315,7 +315,6 @@ if __name__ == "__main__":
         ppc_linear_layer.request_PPC(5)
         print("weight_in shape after request:", ppc_linear_layer.weight_in.shape)
         print("weight_out shape after request:", ppc_linear_layer.weight_out.shape)
-        print("orthogonality loss after request:", ppc_linear_layer.get_orthogonality_loss())
         # check adjust rank
         ppc_linear_layer = PPCLinear(20, 15, 10, bias=True, gate_act_prob=0)
         PPC_adjust_all_rank(ppc_linear_layer, maximal_truncate=5, maximal_request=5, relax=(0, 5), gap_scale=0.33)

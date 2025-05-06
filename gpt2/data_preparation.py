@@ -20,9 +20,8 @@ def preprocess_string(s):
                     .split())
 
 class ShakespeareDataset(Dataset):
-    def __init__(self, dataset, tokenizer, args):
+    def __init__(self, dataset, tokenizer):
         self.dataset = dataset
-        self.p = args
         self.tokenizer = tokenizer
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
@@ -113,9 +112,9 @@ if __name__ == "__main__":
     print(f"Validation size: {len(val_dataset)}")
     print(f"Test size: {len(test_dataset)}")
     # Create the dataset objects
-    train_dataset = ShakespeareDataset(train_dataset, tokenizer, None)
-    val_dataset = ShakespeareDataset(val_dataset, tokenizer, None)
-    test_dataset = ShakespeareDataset(test_dataset, tokenizer, None)
+    train_dataset = ShakespeareDataset(train_dataset, tokenizer)
+    val_dataset = ShakespeareDataset(val_dataset, tokenizer)
+    test_dataset = ShakespeareDataset(test_dataset, tokenizer)
     # Print the first example
     print("Train dataset examples:")
     for i in range(1):
@@ -138,6 +137,9 @@ if __name__ == "__main__":
         input_ids = batch['input_ids']
         max_length = max(max_length, input_ids.shape[1])
     print(f"Max length of the dataset: {max_length}") # 793
+    # print padding token id and vocab size
+    print(f"Padding token id: {tokenizer.pad_token_id}")
+    print(f"Vocab size: {tokenizer.vocab_size}")
     
 
    
