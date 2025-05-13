@@ -34,7 +34,7 @@ class PPCLinear(nn.Module):
     
     def forward(self, input):
         if self.weight_in is None or self.weight_out is None or self.weight_singular is None:
-            # make sure broadcasting works
+            # make sure broadcasting works  
             shape = list(input.shape[:-1]) + [self.out_features]
             output = torch.zeros(shape).to(input.device)
             if self.bias is not None:
@@ -147,7 +147,7 @@ class PPCLinear(nn.Module):
             ratio = 1 - ((1 + gap_scale) / self.scale_coeff)
             requested_singular_values = torch.zeros(requested_rank).to(self.weight_in.device)
             for i in range(requested_rank):
-                requested_singular_values[i] = self.weight_singular.max() * (ratio ** (i + 1))
+                requested_singular_values[i] = self.weight_singular.min() * (ratio ** (i + 1))
             # generate requested weight_in and weight_out, new weights should be orthogonal to the old weights
             requested_weight_in = torch.randn(self.in_features, requested_rank).to(self.weight_in.device)
             requested_weight_out = torch.randn(requested_rank, self.out_features).to(self.weight_in.device)
@@ -274,14 +274,46 @@ def request_all_PPC(model, maximal_request, gap_scale = 0.33):
         if isinstance(module, PPCLinear):
             maximal_rank = module.request_PPC(maximal_request, gap_scale)
 
-def PPC_adjust_all_rank(model, maximal_truncate = 5, maximal_request = 5, relax=(0, 5), gap_scale = 0.33):
+def PPC_adjust_all_rank(model, maximal_truncate = 5, maximal_request = 5, rank_relax=(0, 5), gap_scale = 0.33):
     for module in model.modules():
         if isinstance(module, PPCLinear):
             rank_inference, maximal_rank = module.get_rank_inference()
-            if (maximal_rank - rank_inference) <= relax[0]:
+            if (maximal_rank - rank_inference) <= rank_relax[0]:
                 module.request_PPC(maximal_request, gap_scale)
-            elif (maximal_rank - rank_inference) >= relax[1]:
-                module.truncate_PPC(maximal_truncate)
+            elif (maximal_rank - rank_inference) >= rank_relax[1]:
+                module.truncate_PPC(min(maximal_truncate, maximal_rank - rank_inference - rank_relax[1]))
+
+def PPC_init_from_pretrained(pretrained_linear_layer, rank_relax=(0, 5)):
+    """
+    Initialize the PPCLinear layer from a pretrained linear layer.
+    """
+    # Get the input and output features
+    in_features = pretrained_linear_layer.in_features
+    out_features = pretrained_linear_layer.out_features
+    bias = pretrained_linear_layer.bias is not None
+    # Get the maximal rank
+    maximal_rank = max(1, int(min(in_features, out_features)))
+    # Create a new PPCLinear layer
+    ppc_linear_layer = PPCLinear(in_features, out_features, maximal_rank, bias=bias, gate_act_prob=0.0)
+
+    # Do SVD on the pretrained linear layer's weight
+    weight = pretrained_linear_layer.weight.data
+    weight = weight.t()
+    u, s, v = torch.linalg.svd(weight, full_matrices=False)
+
+    # replace the weights and bias from the pretrained linear layer
+    ppc_linear_layer.weight_in.data = u
+    ppc_linear_layer.weight_out.data = v
+    ppc_linear_layer.weight_singular.data = s
+
+    # get rank inference
+    rank_inference, maximal_rank = ppc_linear_layer.get_rank_inference()
+
+    # adjust the rank
+    PPC_adjust_all_rank(ppc_linear_layer, maximal_truncate=maximal_rank, maximal_request=rank_relax[1], rank_relax=rank_relax)
+
+    return ppc_linear_layer
+
 
 # test
 if __name__ == "__main__":
@@ -317,9 +349,24 @@ if __name__ == "__main__":
         print("weight_out shape after request:", ppc_linear_layer.weight_out.shape)
         # check adjust rank
         ppc_linear_layer = PPCLinear(20, 15, 10, bias=True, gate_act_prob=0)
-        PPC_adjust_all_rank(ppc_linear_layer, maximal_truncate=5, maximal_request=5, relax=(0, 5), gap_scale=0.33)
+        PPC_adjust_all_rank(ppc_linear_layer, maximal_truncate=5, maximal_request=5, rank_relax=(0, 5), gap_scale=0.33)
         print("weight_in shape after adjust:", ppc_linear_layer.weight_in.shape)
         print("weight_out shape after adjust:", ppc_linear_layer.weight_out.shape)
+
+    # test init from pretrained
+    test_init_from_pretrained = False
+    if test_init_from_pretrained:
+        # Create a random input tensor
+        input_tensor = torch.randn(5, 20)
+        # Create a pretrained linear layer
+        pretrained_linear_layer = nn.Linear(20, 15, bias=True)
+        # Initialize the PPCLinear layer from the pretrained linear layer
+        ppc_linear_layer = PPC_init_from_pretrained(pretrained_linear_layer, rank_relax=(0, 5))
+        print("weight_in shape after init:", ppc_linear_layer.weight_in.shape)
+        print("weight_out shape after init:", ppc_linear_layer.weight_out.shape)
+        # Forward pass
+        output_tensor = ppc_linear_layer(input_tensor)
+        print("Output tensor shape after init:", output_tensor.shape)
 
     
 
