@@ -12,8 +12,7 @@ from tqdm import tqdm
 import random
 
 def preprocess_string(s):
-    return ' '.join(s.lower()
-                    .replace('.', ' .')
+    return ' '.join(s.replace('.', ' .')
                     .replace('?', ' ?')
                     .replace(',', ' ,')
                     .replace('\'', ' \'')
@@ -53,10 +52,10 @@ for paragraph in corpus:
     "Name of the character":
     "Some conversation text"
     empty line
-We only use the conversation text for training.
 """
 
-def load_dataset(file_path):
+def load_dataset(file_path, tokenizer, block_size=256):
+    tokenizer.pad_token = tokenizer.eos_token
     paraphrase_data = []
     current_paragraph = ""
     last_line_is_empty = False
@@ -65,25 +64,40 @@ def load_dataset(file_path):
         lines = f.readlines()
         for line in tqdm(lines):
             # Ignore the first line
-            if first_line:
-                first_line = False
-                continue
+            #if first_line:
+            #    first_line = False
+            #    continue
             line = line.strip()
             if line == "": # append the recorded paragraph to the dataset
                 if current_paragraph:
-                    paraphrase_data.append(preprocess_string(current_paragraph))
+                    current_paragraph = preprocess_string(current_paragraph)
+                    # ignore the text with length 2
+                    tokenized = tokenizer(current_paragraph, return_tensors='pt',padding=True, truncation=True)
+                    if tokenized['input_ids'].shape[1] <= 2:
+                        current_paragraph = ""
+                        last_line_is_empty = True
+                        continue
+                    if tokenized['input_ids'].shape[1] > block_size:
+                        current_paragraph = tokenizer.decode(tokenized['input_ids'][0][:block_size], skip_special_tokens=True)
+                        paraphrase_data.append(current_paragraph)
+                        current_paragraph = ""
+                        continue
+                    paraphrase_data.append(current_paragraph)
                     current_paragraph = ""
                 last_line_is_empty = True
                 continue
             # ignore the character names
-            if last_line_is_empty:
-                last_line_is_empty = False
-                continue
+            #if last_line_is_empty:
+            #    last_line_is_empty = False
+            #    continue
             # if normal line, append to the current paragraph
             current_paragraph += line + " "
-        # Append the last paragraph if it exists
-        if current_paragraph:
-            paraphrase_data.append(preprocess_string(current_paragraph))
+            tokenized = tokenizer(current_paragraph, return_tensors='pt',padding=True, truncation=True)
+            if tokenized['input_ids'].shape[1] > block_size:
+                current_paragraph = tokenizer.decode(tokenized['input_ids'][0][:block_size], skip_special_tokens=True)
+                paraphrase_data.append(current_paragraph)
+                current_paragraph = ""
+                continue
     
     return paraphrase_data
 
@@ -94,9 +108,10 @@ if __name__ == "__main__":
     cache_path = "D:/huggingface/cache/"
     model = GPT2Model.from_pretrained('openai-community/gpt2', cache_dir=cache_path)
     tokenizer = GPT2Tokenizer.from_pretrained('openai-community/gpt2', cache_dir=cache_path)
+    tokenizer.pad_token = tokenizer.eos_token
     # Load the dataset
     file_path = "gpt2/data/tinyshakespeare.txt"
-    dataset = load_dataset(file_path)
+    dataset = load_dataset(file_path, tokenizer)
     print(f"Loaded {len(dataset)} examples from {file_path}")
     # Split the dataset into train, validation, and test sets
     train_size = int(0.8 * len(dataset))

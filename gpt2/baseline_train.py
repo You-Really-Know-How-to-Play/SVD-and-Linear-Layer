@@ -25,6 +25,7 @@ def train_baseline_gpt2(model, train_dataloader, dev_dataloader, optimizer, sche
     best_dev_loss = float('inf')
     best_dev_epoch = 0
     current_patience = 0
+    batch_idx = 0
     for epoch in range(args.epochs):
         print(f"Epoch {epoch + 1}/{args.epochs}")
         epoch_train_loss = 0.0
@@ -32,54 +33,44 @@ def train_baseline_gpt2(model, train_dataloader, dev_dataloader, optimizer, sche
         model.train()
         with tqdm(train_dataloader, desc="Training", unit="batch") as train_dataloader:
             for batch in train_dataloader:
+                batch_idx += 1
                 optimizer.zero_grad()
-                input_ids = batch['input_ids'].to(args.device)
-                attention_mask = batch['attention_mask'].to(args.device)
-
-                # shift the input ids to the right
-                labels = input_ids[:, 1:].clone()
-                input_ids = input_ids[:, :-1]
-                attention_mask = attention_mask[:, :-1]
-
-                # forward pass
-                outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-                loss = outputs.loss
+                loss = compute_batch_loss(model, batch, args)
 
                 # backward pass
                 loss.backward()
-                optimizer.step()
-                scheduler.step()
+
+                # gradient accumulation
+                if batch_idx % args.accum_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    scheduler.step()
 
                 epoch_train_loss += loss.item()
 
-                # update the progress bar
-                train_dataloader.set_postfix(loss=loss.item())
+                # update the progress bar with loss and lr
+                train_dataloader.set_postfix(loss=loss.item(), lr=scheduler.get_last_lr()[0])
                 train_dataloader.update(1)
 
         epoch_train_loss /= args.train_size
+        epoch_train_loss *= args.batch_size
         train_loss_history.append(epoch_train_loss)
         # validation
         model.eval()
-        print("Validation...")
         epoch_dev_loss = 0.0
         with torch.no_grad():
             with tqdm(dev_dataloader, desc="Validation", unit="batch") as dev_dataloader:
                 for batch in dev_dataloader:
-                    input_ids = batch['input_ids'].to(args.device)
-                    attention_mask = batch['attention_mask'].to(args.device)
-                    # shift the input ids to the right
-                    labels = input_ids[:, 1:].clone()
-                    input_ids = input_ids[:, :-1]
-                    attention_mask = attention_mask[:, :-1]
-                    # forward pass
-                    outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-                    loss = outputs.loss
+                    loss = compute_batch_loss(model, batch, args)
                     
                     epoch_dev_loss += loss.item()
                     # update the progress bar
                     dev_dataloader.set_postfix(loss=loss.item())
                     dev_dataloader.update(1)
+
         epoch_dev_loss /= args.dev_size
+        epoch_dev_loss *= args.batch_size
         dev_loss_history.append(epoch_dev_loss)
         # early stopping
         if epoch_dev_loss < best_dev_loss:
@@ -87,7 +78,7 @@ def train_baseline_gpt2(model, train_dataloader, dev_dataloader, optimizer, sche
             best_dev_epoch = epoch
             current_patience = 0
             # save the model
-            model.model.save_pretrained(args.output_dir)
+            torch.save(model, args.output_dir)
         else:
             current_patience += 1
             if current_patience >= args.patience:
@@ -97,31 +88,68 @@ def train_baseline_gpt2(model, train_dataloader, dev_dataloader, optimizer, sche
 
     return train_loss_history, dev_loss_history
 
-def compute_loss(outputs_logits, correct_labels, loss_fct):
+def compute_batch_loss(model, batch, args):
     # Compute the loss
-    loss = loss_fct(outputs_logits.view(-1, outputs_logits.size(-1)), correct_labels.view(-1))
+    input_ids = batch['input_ids'].to(args.device)
+    attention_mask = batch['attention_mask'].to(args.device)
+    # shift the input ids to the right
+    labels = input_ids.clone()
+    #labels[:, :-1] = input_ids[:, 1:].clone()
+    #labels[:, -1] = -100
+    labels = labels.to(args.device)
+
+    # forward pass
+    outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+    loss = outputs.loss
+    if torch.isnan(loss):
+        print("Loss is NaN, please check the input data.")
+        print("Input IDs:", input_ids, input_ids.shape)
+        print("Attention mask:", attention_mask, attention_mask.shape)
+        print("Labels:", labels, labels.shape)
+        exit(1)
     return loss
 
+# From https://github.com/shreydan/shakespeareGPT/
 class train_args:
     def __init__(self, train_size, dev_size, test_size):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.epochs = 4
-        self.batch_size = 2
-        self.learning_rate = 1e-5
-        self.patience = 3
-        self.output_dir = "gpt2/baseline_gpt2_model/"
-        self.loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+        self.epochs = 64
+        self.batch_size = 4
+        self.learning_rate = 5e-4
+        self.accum_steps = 8
+        self.max_grad_norm = 100.0
+        self.patience = 24
+        self.output_dir = "gpt2/baseline_gpt2_model/best_model.pt"
         self.train_size = train_size
         self.dev_size = dev_size
         self.test_size = test_size
+        self.n_positions = 256
+        self.n_embd = 1024
+        self.n_layer = 8
+        self.n_head = 8
+        self.attn_drop = 0.2
+        self.embd_drop = 0.2
+
+import os
+debugging = False
+if debugging:
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+    os.environ["TORCH_USE_CUDA_DSA"] = "1"
+else:
+    os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
+    os.environ["TORCH_USE_CUDA_DSA"] = "0"
 
 if __name__ == "__main__":
     # Set the seed for reproducibility
     seed_everything(5)
 
+    cache_path = "D:/huggingface/cache/"
+    tokenizer = GPT2Tokenizer.from_pretrained('openai-community/gpt2', cache_dir=cache_path)
+    tokenizer.pad_token = tokenizer.eos_token
+
     # Load the dataset
     file_path = "gpt2/data/tinyshakespeare.txt"
-    dataset = load_dataset(file_path)
+    dataset = load_dataset(file_path, tokenizer)
     print(f"Loaded {len(dataset)} examples from {file_path}")
 
     # Split the dataset into train, validation, and test sets
@@ -134,13 +162,14 @@ if __name__ == "__main__":
     
     print(f"Using device: {args.device}")
     # Load the tokenizer and model
-    cache_path = "D:/huggingface/cache/"
-    tokenizer = GPT2Tokenizer.from_pretrained('openai-community/gpt2', cache_dir=cache_path)
-    config = GPT2Config(n_layer=4, n_head=4, n_embd=384)
+    config = GPT2Config(n_embd=args.n_embd, 
+                        n_layer=args.n_layer, 
+                        n_head=args.n_head, 
+                        n_positions=args.n_positions, 
+                        attn_pdrop=args.attn_drop, 
+                        embd_pdrop=args.embd_drop)
     model = GPT2BaselineModel(config, tokenizer)
     model.to(args.device)
-
-
 
     # Suffle the dataset
     random.shuffle(dataset)
@@ -160,8 +189,8 @@ if __name__ == "__main__":
     test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, collate_fn=test_dataset.collate_fn)
 
     # Create the optimizer and scheduler
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
-    total_steps = (len(train_dataloader) // args.batch_size + 1) * args.epochs
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate / args.accum_steps)
+    total_steps = ((len(train_dataloader) // args.accum_steps) + 1) * args.epochs
     warmup_steps = int(total_steps * 0.1)
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
 
@@ -171,8 +200,23 @@ if __name__ == "__main__":
     print("Training finished.")
 
     # Print the training and validation loss history
-    print("Training loss history:", train_loss_history)
-    print("Validation loss history:", dev_loss_history)
+    #print("Training loss history:", train_loss_history)
+    #print("Validation loss history:", dev_loss_history)
+
+    # Print test loss
+    model.eval()
+    with tqdm(test_dataloader, desc="Testing", unit="batch") as test_dataloader:
+        test_loss = 0.0
+        with torch.no_grad():
+            for batch in test_dataloader:
+                loss = compute_batch_loss(model, batch, args)
+                test_loss += loss.item()
+                # update the progress bar
+                test_dataloader.set_postfix(loss=loss.item())
+                test_dataloader.update(1)
+        test_loss /= args.test_size
+        test_loss *= args.batch_size
+    print(f"Test loss: {test_loss:.4f}")
 
 
   
